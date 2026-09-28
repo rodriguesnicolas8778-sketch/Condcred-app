@@ -191,7 +191,7 @@ label.f input[type=date]{-webkit-appearance:none;appearance:none;display:block;t
 label.f input[type=date]::-webkit-date-and-time-value{text-align:left;margin:0}
 label.f input[type=date]::-webkit-datetime-edit{padding:0}
 label.f input:focus,label.f select:focus,label.f textarea:focus{outline:2px solid var(--gold);outline-offset:0;border-color:var(--gold)}
-.preview{grid-column:1/-1;display:grid;grid-template-columns:repeat(3,1fr);gap:10px;background:var(--gold-soft);border-radius:12px;padding:12px 14px}
+.preview{grid-column:1/-1;display:grid;grid-template-columns:repeat(2,1fr);gap:10px;background:var(--gold-soft);border-radius:12px;padding:12px 14px}
 .preview .k{font-size:12px;color:var(--muted)}
 .preview .v{font:700 16px/1.3 Montserrat,sans-serif;font-variant-numeric:tabular-nums}
 .hint{grid-column:1/-1;font-size:12.5px;color:var(--muted);margin:-4px 0 0}
@@ -279,7 +279,7 @@ body.discreto .card dd, body.discreto .ledger .s, body.discreto .chart text, bod
   .save i{width:10px;height:10px}
   main{padding-top:20px}
   .dlg-body{grid-template-columns:1fr}
-  .preview{grid-template-columns:1fr 1fr 1fr}
+  .preview{grid-template-columns:1fr 1fr}
   .facts{grid-template-columns:1fr 1fr}
 }
 @media (max-width:480px){
@@ -352,6 +352,20 @@ function toast(msg){ const t = $("#toast"); t.textContent = msg; t.classList.add
 /* ================= regras do contrato ================= */
 // Cláusula XIII: multa 2% sobre o débito + juros de 1% a.m. pro rata die.
 const MULTA = 0.02, JUROS_AM = 0.01;
+// IOF-Crédito em factoring (Decreto 6.306/2007, art. 7º, alíquotas do Decreto 12.499/2025):
+// alíquota diária sobre o valor líquido de cada parcela, da antecipação ao vencimento (máx. 365 dias), mais adicional de 0,38%.
+// O IOF é custo da CONDCRED (ela recolhe ao Tesouro e não desconta do prestador). A tarifa por operação é descontada do prestador.
+const IOF = {pj: 0.000082, pf: 0.000082, simples: 0.0000274, adicional: 0.0038, limiteSimples: 30000};
+const TARIFA_PADRAO = 150;
+const IOF_REG = {pj: "Pessoa jurídica", simples: "Simples Nacional / MEI", pf: "Pessoa física", isento: "Sem IOF"};
+function calcIOF(data, lista, nominal, desPct, regime){
+  if (!data || regime === "isento" || !IOF_REG[regime]) return 0;
+  const f = 1 - (+desPct || 0) / 100, base = (+nominal || 0) * f;
+  const dia = regime === "simples" && base <= IOF.limiteSimples ? IOF.simples : IOF[regime];
+  let t = 0;
+  lista.forEach(([v, venc]) => { v = (+v || 0) * f; if (v <= 0) return; const d = venc ? Math.min(365, Math.max(0, daysBetween(data, venc))) : 0; t += v * (dia * d + IOF.adicional); });
+  return Math.round(t * 100) / 100;
+}
 function statusBoleto(b){ if (b.pagoEm) return "pago"; return (b.vencimento && b.vencimento < today()) ? "atrasado" : "aberto"; }
 function encargos(b){
   const ref = b.pagoEm || today();
@@ -384,7 +398,11 @@ function calcOp(op){
   const status = qtd && pagos === qtd ? "quitada" : (qtdAtr ? "atrasado" : "aberto");
   const prazo = prazoMedio(op.data, (op.boletos||[]).map(b => [b.valor, b.vencimento]));
   const taxaMes = prazo > 0 ? (+op.desagioPct||0) / prazo : 0;
-  return {nominal, antecipado, desagio, recebido, aberto, atrasado, encargosTot, totalFinal, qtdAtr, pagos, qtd, progresso, status, prazo, taxaMes};
+  const iof = +op.iof || 0, tarifa = +op.tarifa || 0;
+  const liquido = antecipado - tarifa;            // o que o prestador efetivamente recebe
+  const receita = desagio + tarifa - iof;         // resultado da CONDCRED: deságio + tarifa, menos o IOF que ela paga
+  const capital = liquido + iof;                  // saída de caixa da CONDCRED (prestador + IOF recolhido)
+  return {nominal, antecipado, desagio, recebido, aberto, atrasado, encargosTot, totalFinal, qtdAtr, pagos, qtd, progresso, status, prazo, taxaMes, iof, tarifa, liquido, receita, capital};
 }
 
 /* ================= estado & persistência ================= */
@@ -408,6 +426,7 @@ function cleanOp(o){
   const n = v => { v = +v; return isFinite(v) ? v : 0; };
   return {id: idOk(o.id), clienteId: idOk(o.clienteId), condoId: idOk(o.condoId), servico: str(o.servico), obs: str(o.obs), data: isoOk(o.data), criadoEm: isoOk(o.criadoEm),
     valorNominal: n(o.valorNominal), desagioPct: Math.min(99.99, Math.max(0, n(o.desagioPct))),
+    iof: Math.max(0, n(o.iof)), tarifa: Math.max(0, n(o.tarifa)), iofRegime: IOF_REG[o.iofRegime] ? o.iofRegime : (n(o.iof) > 0 ? "pj" : "isento"),
     boletos: (Array.isArray(o.boletos) ? o.boletos : []).slice(0, 240).map(b => { const x = {id: idOk(b.id) || uid("b"), numero: str(b.numero).slice(0,20), vencimento: isoOk(b.vencimento), valor: n(b.valor)}; if (isoOk(b.pagoEm)){ x.pagoEm = b.pagoEm; if (b.valorPago != null && b.valorPago !== "") x.valorPago = n(b.valorPago); } return x; }),
     nfs: (Array.isArray(o.nfs) ? o.nfs : []).slice(0, 100).map(x => ({id: idOk(x.id) || uid("nf"), tipo: x.tipo === "condominio" ? "condominio" : "prestador", numero: str(x.numero).slice(0,40), data: isoOk(x.data), valor: x.valor ? n(x.valor) : null}))};
 }
@@ -638,8 +657,8 @@ function allBoletos(){
   return out.sort((x,y) => (x.b.vencimento||"").localeCompare(y.b.vencimento||""));
 }
 function totals(opsList){
-  const t = {antecipado:0, desagio:0, recebido:0, aberto:0, atrasado:0, encargos:0, nominal:0, totalFinal:0, qtdAtr:0};
-  opsList.forEach(op => { const c = calcOp(op); t.antecipado += c.antecipado; t.desagio += c.desagio; t.recebido += c.recebido; t.aberto += c.aberto; t.atrasado += c.atrasado; t.encargos += c.encargosTot; t.nominal += c.nominal; t.totalFinal += c.totalFinal; t.qtdAtr += c.qtdAtr; });
+  const t = {antecipado:0, desagio:0, recebido:0, aberto:0, atrasado:0, encargos:0, nominal:0, totalFinal:0, qtdAtr:0, iof:0, tarifa:0, liquido:0, receita:0, capital:0};
+  opsList.forEach(op => { const c = calcOp(op); t.antecipado += c.antecipado; t.iof += c.iof; t.tarifa += c.tarifa; t.liquido += c.liquido; t.receita += c.receita; t.capital += c.capital; t.desagio += c.desagio; t.recebido += c.recebido; t.aberto += c.aberto; t.atrasado += c.atrasado; t.encargos += c.encargosTot; t.nominal += c.nominal; t.totalFinal += c.totalFinal; t.qtdAtr += c.qtdAtr; });
   return t;
 }
 
@@ -715,7 +734,7 @@ function vGeral(title){
   return top(title, `${ops.length} ${ops.length===1?"antecipação":"antecipações"} com ${new Set(ops.map(o => o.clienteId)).size} ${new Set(ops.map(o => o.clienteId)).size===1?"prestador":"prestadores"}${filtersOn() ? " (filtrado)" : ""}`, `<button class="btn" data-act="export">${ICON_DL}Exportar planilha</button><button class="btn ghost" data-act="backup">Backup</button><button class="btn ghost" data-act="lixeira">Lixeira${Object.keys(LIXO).length ? " (" + Object.keys(LIXO).length + ")" : ""}</button>`) + `
   <section class="ledger" aria-label="Resumo da carteira">
     <div><div class="k">Carteira sob gestão (a receber)</div><div class="v">${brl(carteira)}</div><div class="s">de ${brl(t.nominal)} em serviços comprados</div></div>
-    <div><div class="k">Total antecipado</div><div class="v num">${brl(t.antecipado)}</div><div class="s">pago aos prestadores</div></div>
+    <div><div class="k">Total antecipado</div><div class="v num">${brl(t.liquido)}</div><div class="s">pago aos prestadores${t.tarifa ? ` · tarifas ${brl(t.tarifa)} descontadas` : ""}${t.iof ? ` · IOF pago pela CONDCRED ${brl(t.iof)}` : ""}</div></div>
     <div><div class="k">Deságio</div><div class="v num">${brl(t.desagio)}</div><div class="s">${pct(t.nominal ? t.desagio/t.nominal*100 : 0)} médio</div></div>
     <div><div class="k">Já recebido</div><div class="v num">${brl(t.recebido)}</div><div class="s">${pct(t.nominal ? t.recebido/(t.nominal+t.encargos)*100 : 0)} do total final</div></div>
     <div><div class="k">Em atraso</div><div class="v num ${t.atrasado ? "red" : ""}">${brl(t.atrasado)}</div><div class="s">${atrasados.length} ${atrasados.length===1?"boleto":"boletos"} · +${brl(t.encargos)} de encargos</div></div>
@@ -756,14 +775,14 @@ function kpisHTML(ops){
   const topCon = Object.entries(porCon).sort((a,b) => b[1]-a[1])[0];
   const conc = topCon && t.aberto ? topCon[1] / t.aberto : 0;
   const mesAtual = hoje.slice(0,7), dPrev = new Date(); dPrev.setDate(1); dPrev.setMonth(dPrev.getMonth()-1); const mesAnt = iso(dPrev).slice(0,7);
-  const antMes = k => ops.filter(o => (o.data||"").slice(0,7) === k).reduce((s,o) => s + calcOp(o).antecipado, 0);
+  const antMes = k => ops.filter(o => (o.data||"").slice(0,7) === k).reduce((s,o) => s + calcOp(o).liquido, 0);
   const aM = antMes(mesAtual), aP = antMes(mesAnt);
   const nCli = new Set(ops.map(o => o.clienteId)).size, nCon = new Set(ops.map(o => o.condoId)).size;
   const quit = ops.filter(o => calcOp(o).status === "quitada").length;
   const tone = (v, bom, ruim, inverso) => inverso ? (v >= ruim ? "bad" : v >= bom ? "mid" : "good") : (v >= bom ? "good" : v >= ruim ? "mid" : "bad");
   const k = (label, value, note, bar, cls) => `<div class="kpi ${cls||""}"><div class="kl">${label}</div><div class="kv num">${value}</div>${bar != null ? `<div class="kbar"><i style="width:${Math.max(2, Math.min(100, bar*100))}%"></i></div>` : ""}<div class="kn">${note}</div></div>`;
   return `<section class="kpis" aria-label="Indicadores">
-    ${k("Rentabilidade da carteira", pct(t.antecipado ? t.desagio / t.antecipado * 100 : 0), "deságio sobre o capital antecipado", null, "hl")}
+    ${k("Rentabilidade da carteira", pct(t.capital ? t.receita / t.capital * 100 : 0), t.tarifa || t.iof ? "deságio + tarifas − IOF, sobre o capital aplicado" : "deságio sobre o capital antecipado", null, "hl")}
     ${(() => { let base = 0; ops.forEach(o => { const c = calcOp(o); base += c.nominal * c.prazo; }); return k("Taxa média ao mês", pct(base ? t.desagio / base * 100 : 0), "deságio dividido pelo prazo médio das parcelas"); })()}
     ${k("Deságio médio (total)", pct(t.nominal ? t.desagio / t.nominal * 100 : 0), "sobre o valor nominal, no prazo inteiro")}
     ${k("Inadimplência", pct(inad * 100), `${brl(t.atrasado)} de ${brl(valVencido)} já vencidos`, inad, tone(inad, .02, .08, true))}
@@ -809,7 +828,7 @@ function buildSeries(){
     let ant = 0, rec = 0, saldo = 0;
     ops.forEach(op => {
       const c = calcOp(op);
-      if (monthKey(op.data) === k) ant += c.antecipado;
+      if (monthKey(op.data) === k) ant += c.liquido;
       if ((op.data||"") <= last){
         let pagoAte = 0;
         (op.boletos||[]).forEach(b => { if (b.pagoEm && b.pagoEm <= last) pagoAte += b.valor; if (b.pagoEm && monthKey(b.pagoEm) === k) rec += (b.valorPago != null ? +b.valorPago : b.valor + encargos(b).total); });
@@ -892,10 +911,10 @@ function vOps(){
       <td><strong>${esc(cliName(op.clienteId))}</strong><span class="sub">${esc(op.servico||"")}</span></td>
       <td>${esc(conName(op.condoId))}</td><td>${fmtD(op.data)}</td>
       <td class="n">${brl(c.nominal)}</td><td class="n">${pct(op.desagioPct)}<span class="sub">${pct(c.taxaMes)} a.m. · ${brl(c.desagio)}</span></td>
-      <td class="n">${brl(c.antecipado)}</td><td class="n">${brl(c.recebido)}</td><td class="n"><strong>${brl(c.totalFinal)}</strong>${c.encargosTot ? `<span class="sub" style="color:var(--red)">+${brl(c.encargosTot)} encargos</span>` : ""}</td>
+      <td class="n">${brl(c.liquido)}${c.iof || c.tarifa ? `<span class="sub">tarifa ${brl(c.tarifa)} · IOF ${brl(c.iof)} (CONDCRED)</span>` : ""}</td><td class="n">${brl(c.recebido)}</td><td class="n"><strong>${brl(c.totalFinal)}</strong>${c.encargosTot ? `<span class="sub" style="color:var(--red)">+${brl(c.encargosTot)} encargos</span>` : ""}</td>
       <td><div class="bar" title="${c.pagos} de ${c.qtd} pagas"><i style="width:${c.progresso*100}%"></i></div><span class="sub">${c.pagos}/${c.qtd} pagas</span></td>
       <td>${chip(c.status)}</td></tr>`; }).join("") || `<tr><td colspan="10" class="empty">Nenhuma antecipação com esses filtros.</td></tr>`}</tbody>
-    ${ops.length ? `<tfoot><tr><td colspan="3"><strong>Total</strong></td><td class="n"><strong>${brl(t.nominal)}</strong></td><td class="n"><strong>${brl(t.desagio)}</strong></td><td class="n"><strong>${brl(t.antecipado)}</strong></td><td class="n"><strong>${brl(t.recebido)}</strong></td><td class="n"><strong>${brl(t.totalFinal)}</strong></td><td colspan="2"></td></tr></tfoot>` : ""}
+    ${ops.length ? `<tfoot><tr><td colspan="3"><strong>Total</strong></td><td class="n"><strong>${brl(t.nominal)}</strong></td><td class="n"><strong>${brl(t.desagio)}</strong></td><td class="n"><strong>${brl(t.liquido)}</strong></td><td class="n"><strong>${brl(t.recebido)}</strong></td><td class="n"><strong>${brl(t.totalFinal)}</strong></td><td colspan="2"></td></tr></tfoot>` : ""}
   </table></div>`;
 }
 function chip(st){ const l = {pago:"Pago",aberto:"Em aberto",atrasado:"Em atraso",quitada:"Quitada"}[st]; return `<span class="chip ${st}">${l}</span>`; }
@@ -928,7 +947,7 @@ function vClientes(){
   ${cls.length ? "" : `<p style="color:var(--muted)">Nenhum prestador com esses filtros.</p>`}<div class="cards">${cls.map(c => { const ops = allOps().filter(o => o.clienteId === c.id); const t = totals(ops);
     const atrC = [...new Set(allBoletos().filter(x => x.op.clienteId === c.id && x.st === "atrasado").map(x => conName(x.op.condoId)))];
     return `<article class="card"><div><h3>${esc(c.nome)}</h3><span class="sub">${esc([c.doc, c.contato].filter(Boolean).join(" · ") || "Sem CNPJ/contato cadastrado")}</span></div>
-      <dl><dt>Antecipações</dt><dd>${ops.length}</dd><dt>Serviços realizados</dt><dd>${brl(t.nominal)}</dd><dt>Antecipado</dt><dd>${brl(t.antecipado)}</dd><dt>Deságio</dt><dd>${brl(t.desagio)}</dd><dt>Recebido</dt><dd>${brl(t.recebido)}</dd><dt>A receber</dt><dd>${brl(t.aberto)}</dd><dt>Total no final</dt><dd>${brl(t.totalFinal)}</dd></dl>
+      <dl><dt>Antecipações</dt><dd>${ops.length}</dd><dt>Serviços realizados</dt><dd>${brl(t.nominal)}</dd><dt>Antecipado</dt><dd>${brl(t.liquido)}</dd><dt>Deságio</dt><dd>${brl(t.desagio)}</dd><dt>Recebido</dt><dd>${brl(t.recebido)}</dd><dt>A receber</dt><dd>${brl(t.aberto)}</dd><dt>Total no final</dt><dd>${brl(t.totalFinal)}</dd></dl>
       ${atrC.length ? `<div class="alert-line">Atraso: ${esc(atrC.join(", "))}</div>` : ""}
       <div class="foot"><button class="btn small" data-edit-cli="${c.id}">Editar</button><button class="btn small ghost" data-filter-cli="${c.id}">Ver antecipações</button></div></article>`; }).join("")}</div>`;
 }
@@ -973,7 +992,9 @@ function renderDrawer(){
     <div class="facts">
       <div><div class="k">Serviço realizado (valor nominal)</div><div class="v">${brl(c.nominal)}</div></div>
       <div><div class="k">Deságio (${pct(op.desagioPct)} no total · ${pct(c.taxaMes)} ao mês)</div><div class="v">${brl(c.desagio)}</div></div>
-      <div><div class="k">Valor antecipado líquido</div><div class="v">${brl(c.antecipado)}</div></div>
+      <div><div class="k">IOF pago pela CONDCRED (${esc(IOF_REG[op.iofRegime] || "")})</div><div class="v">${brl(c.iof)}</div></div>
+      <div><div class="k">Tarifa da operação</div><div class="v">${brl(c.tarifa)}</div></div>
+      <div><div class="k">Líquido pago ao prestador</div><div class="v">${brl(c.liquido)}</div></div>
       <div><div class="k">Já recebido</div><div class="v">${brl(c.recebido)}</div></div>
       <div><div class="k">A receber</div><div class="v">${brl(c.aberto)}</div></div>
       <div><div class="k">Encargos de mora</div><div class="v" style="${c.encargosTot ? "color:var(--red)" : ""}">${brl(c.encargosTot)}</div></div>
@@ -1021,6 +1042,9 @@ function opForm(op){
     <label class="f regen">Nº de parcelas ${edit ? "em aberto" : "(boletos)"}<input name="parcelas" type="number" min="1" max="120" step="1" required value="${edit ? Math.max(1, abertos.length) : 12}"></label>
     <label class="f regen">${edit ? "Vencimento da próxima parcela" : "1º vencimento"}<input type="date" name="primeiroVenc" required value="${esc(defVenc)}"></label>
     <p class="hint regen">Os boletos são gerados dividindo o valor ${edit ? "que falta receber" : "nominal"} em parcelas mensais iguais.</p>
+    <label class="f">IOF — o prestador é<select name="iofRegime">${Object.entries(IOF_REG).map(([k, v]) => `<option value="${k}"${(edit ? op.iofRegime : "pj") === k ? " selected" : ""}>${v}</option>`).join("")}</select></label>
+    <label class="f">Tarifa da operação (R$)<input name="tarifa" inputmode="decimal" value="${esc(vfmt(edit ? (op.tarifa || 0) : TARIFA_PADRAO))}" autocomplete="off"></label>
+    <p class="hint">A tarifa é descontada do valor pago ao prestador. O IOF é pago pela CONDCRED:  0,0082% ao dia sobre cada parcela, até o vencimento (máx. 365 dias), + 0,38%. Simples Nacional/MEI em operações de até R$ 30 mil: 0,00274% ao dia + 0,38%.</p>
     ${edit ? "" : `<div class="fieldset-title">Notas fiscais (opcional)</div>
     <label class="f">NF do prestador nº<input name="nfPrest" maxlength="40"></label>
     <label class="f">NF do condomínio nº<input name="nfCond" maxlength="40"></label>`}
@@ -1033,16 +1057,17 @@ function opForm(op){
   const syncRegen = () => { f.querySelectorAll(".regen").forEach(el => el.style.display = regenOn() ? "" : "none"); f.parcelas.required = f.primeiroVenc.required = regenOn(); };
   let lowOk = false, src = "total";
   // cronograma que vai valer depois de salvar, para calcular o prazo médio
-  const prazoForm = () => {
-    const n = num(f.valorNominal.value), data = f.data.value;
-    if (!regenOn()) return prazoMedio(data, (op.boletos||[]).map(b => [b.valor, b.vencimento]));
+  const listaForm = () => {
+    const n = num(f.valorNominal.value);
+    if (!regenOn()) return (op.boletos||[]).map(b => [b.valor, b.vencimento]);
     const par = Math.max(1, Math.min(120, Math.floor(+f.parcelas.value||1))), v1 = f.primeiroVenc.value;
-    if (!isoOk(v1)) return 0;
+    if (!isoOk(v1)) return null;
     const rest = Math.max(0, n - pagoValor) || 1;
     const lista = pagos.map(b => [b.valor, b.vencimento]);
     for (let i = 0; i < par; i++) lista.push([rest / par, addMonths(v1, i)]);
-    return prazoMedio(data, lista);
+    return lista;
   };
+  const prazoForm = () => { const l = listaForm(); return l ? prazoMedio(f.data.value, l) : 0; };
   const sync = () => {
     const pz = prazoForm();
     if (src === "mes"){ const tm = f.taxaMes.value.trim(); f.desagioPct.value = tm && pz > 0 ? pctIn(num(tm) * pz) : (tm ? "" : f.desagioPct.value); }
@@ -1056,7 +1081,8 @@ function opForm(op){
     const n = num(f.valorNominal.value), p = num(f.desagioPct.value), par = Math.max(1, Math.floor(+f.parcelas.value||1));
     const rest = Math.max(0, n - pagoValor);
     const pzTxt = pz > 0 ? pz.toLocaleString("pt-BR", {maximumFractionDigits:1}) + " meses" : "—";
-    $("#pv").innerHTML = `<div><div class="k">Deságio (prazo médio ${pzTxt})</div><div class="v">${brl(n*p/100)}</div></div><div><div class="k">Antecipado líquido</div><div class="v">${brl(n - n*p/100)}</div></div><div><div class="k">${regenOn() ? "Cada boleto" : "Valor nominal"}</div><div class="v">${brl(regenOn() ? rest/par : n)}</div></div>`;
+    const lf = listaForm(), iofV = lf ? calcIOF(f.data.value, lf, n, p, f.iofRegime.value) : 0, tar = Math.max(0, num(f.tarifa.value));
+    $("#pv").innerHTML = `<div><div class="k">Deságio (prazo médio ${pzTxt})</div><div class="v">${brl(n*p/100)}</div></div><div><div class="k">Líquido ao prestador (− tarifa)</div><div class="v">${brl(n - n*p/100 - tar)}</div></div><div><div class="k">IOF pago pela CONDCRED</div><div class="v">${brl(iofV)}</div></div><div><div class="k">${regenOn() ? "Cada boleto" : "Valor nominal"}</div><div class="v">${brl(regenOn() ? rest/par : n)}</div></div>`;
     err.textContent = ""; lowOk = false;
   };
   if (edit){
@@ -1064,7 +1090,12 @@ function opForm(op){
     f.valorNominal.addEventListener("input", () => { if (Math.abs(num(f.valorNominal.value) - orig) > .004 && !f.regen.dataset.touched) f.regen.checked = true; syncRegen(); });
     f.regen.addEventListener("change", () => { f.regen.dataset.touched = "1"; syncRegen(); upd(); });
   }
-  f.addEventListener("input", upd); syncRegen(); upd();
+  if (!edit) f.cliente.addEventListener("change", () => {
+    const c = Object.values(D().clientes).find(x => norm(x.nome) === norm(f.cliente.value));
+    const ult = c && Object.values(D().ops).filter(o => o.clienteId === c.id && o.iofRegime).sort((a,b) => (b.data||"").localeCompare(a.data||""))[0];
+    if (ult){ f.iofRegime.value = ult.iofRegime; upd(); }
+  });
+  f.addEventListener("input", upd); f.iofRegime.addEventListener("change", upd); syncRegen(); upd();
   f.addEventListener("submit", e => {
     e.preventDefault();
     const nome1 = f.cliente.value.trim(), nome2 = f.condo.value.trim();
@@ -1074,6 +1105,8 @@ function opForm(op){
     if (!(valor > 0)) return fail("Informe o valor do serviço. Ex.: 200.000,00");
     if (!(des >= 0 && des < 100)) return fail("O deságio precisa estar entre 0% e 99,99%.");
     if (!isoOk(f.data.value)) return fail("Informe a data da antecipação.");
+    if (f.tarifa.value.trim() && !(num(f.tarifa.value) >= 0)) return fail("Informe a tarifa em reais. Ex.: 150,00");
+    if (!(valor * (1 - des/100) - Math.max(0, num(f.tarifa.value)) > 0)) return fail("Com esse deságio e essa tarifa, o prestador não receberia nada. Confira os valores.");
     if (regenOn()){
       if (!(par >= 1 && par <= 120)) return fail("Use de 1 a 120 parcelas.");
       if (!isoOk(f.primeiroVenc.value)) return fail("Informe o vencimento da primeira parcela.");
@@ -1083,7 +1116,8 @@ function opForm(op){
     if (valor < 100 && !lowOk){ lowOk = true; return fail(`O valor ficou ${brl(valor)}. Se estiver certo, toque em "${edit ? "Salvar alterações" : "Registrar antecipação"}" de novo.`); }
     const cli = ensure("cliente", nome1), con = ensure("condo", nome2);
     const o = edit ? JSON.parse(JSON.stringify(op)) : {id: uid("op"), boletos: [], nfs: [], criadoEm: today()};
-    Object.assign(o, {clienteId: cli, condoId: con, servico: f.servico.value.trim(), valorNominal: valor, desagioPct: des, data: f.data.value, obs: f.obs.value.trim()});
+    Object.assign(o, {clienteId: cli, condoId: con, servico: f.servico.value.trim(), valorNominal: valor, desagioPct: des, data: f.data.value, obs: f.obs.value.trim(),
+      tarifa: Math.max(0, num(f.tarifa.value)), iofRegime: IOF_REG[f.iofRegime.value] ? f.iofRegime.value : "pj"});
     if (regenOn()){
       const keep = edit ? o.boletos.filter(b => b.pagoEm) : [];
       const total = keep.length + par, cents = Math.round((valor - keep.reduce((s,b) => s + b.valor, 0)) * 100), base = Math.floor(cents / par);
@@ -1092,6 +1126,7 @@ function opForm(op){
       o.boletos = keep.concat(novos).sort((a,b) => (a.vencimento||"").localeCompare(b.vencimento||""));
       o.boletos.forEach((b,i) => b.numero = pad(i+1) + "/" + pad(total));
     }
+    o.iof = calcIOF(o.data, o.boletos.map(b => [b.valor, b.vencimento]), valor, des, o.iofRegime);
     if (!edit){
       if (f.nfPrest.value.trim()) o.nfs.push({id: uid("nf"), tipo: "prestador", numero: f.nfPrest.value.trim(), data: o.data, valor: o.valorNominal});
       if (f.nfCond.value.trim()) o.nfs.push({id: uid("nf"), tipo: "condominio", numero: f.nfCond.value.trim(), data: o.data});
@@ -1160,9 +1195,9 @@ let downloads = null;
 function csvCell(v){ v = String(v == null ? "" : v); if (/^[=+\-@\t\r]/.test(v) && !/^-?\d[\d.,]*$/.test(v)) v = "'" + v; return `"${v.replace(/"/g,'""')}"`; }
 async function exportCSV(){
   const sep = ";", n2 = v => (+v||0).toFixed(2).replace(".",",");
-  const lines = [["Prestador","Condomínio","Serviço","Data","Valor nominal","Deságio total %","Taxa ao mês %","Deságio R$","Antecipado","Recebido","A receber","Encargos","Total no final","Boleto","Vencimento","Valor boleto","Situação","Pago em"].join(sep)];
+  const lines = [["Prestador","Condomínio","Serviço","Data","Valor nominal","Deságio total %","Taxa ao mês %","Deságio R$","Regime IOF","IOF (pago pela CONDCRED)","Tarifa","Líquido ao prestador","Recebido","A receber","Encargos","Total no final","Boleto","Vencimento","Valor boleto","Situação","Pago em"].join(sep)];
   allOps().forEach(op => { const c = calcOp(op); (op.boletos.length ? op.boletos : [{}]).forEach(b => {
-    lines.push([cliName(op.clienteId), conName(op.condoId), op.servico||"", fmtD(op.data), n2(c.nominal), n2(op.desagioPct), n2(c.taxaMes), n2(c.desagio), n2(c.antecipado), n2(c.recebido), n2(c.aberto), n2(c.encargosTot), n2(c.totalFinal), b.numero||"", b.vencimento ? fmtD(b.vencimento) : "", b.valor != null ? n2(b.valor) : "", b.id ? statusBoleto(b) : "", b.pagoEm ? fmtD(b.pagoEm) : ""].map(csvCell).join(sep)); }); });
+    lines.push([cliName(op.clienteId), conName(op.condoId), op.servico||"", fmtD(op.data), n2(c.nominal), n2(op.desagioPct), n2(c.taxaMes), n2(c.desagio), IOF_REG[op.iofRegime] || "", n2(c.iof), n2(c.tarifa), n2(c.liquido), n2(c.recebido), n2(c.aberto), n2(c.encargosTot), n2(c.totalFinal), b.numero||"", b.vencimento ? fmtD(b.vencimento) : "", b.valor != null ? n2(b.valor) : "", b.id ? statusBoleto(b) : "", b.pagoEm ? fmtD(b.pagoEm) : ""].map(csvCell).join(sep)); }); });
   const data = "\ufeff" + lines.join("\r\n");
   await saveFile("condcred-antecipacoes-" + today() + ".csv", data, "text/csv");
 }
@@ -1232,6 +1267,7 @@ function makeDemo(){
       const atras = (k === 1 && i === 4) || (k === 2 && i === 3);
       if (venc < today() && !atras) b.pagoEm = venc;
       op.boletos.push(b); }
+    op.iofRegime = "pj"; op.tarifa = TARIFA_PADRAO; op.iof = calcIOF(op.data, op.boletos.map(b => [b.valor, b.vencimento]), val, des, "pj");
     d.ops[op.id] = op;
   });
   return d;
